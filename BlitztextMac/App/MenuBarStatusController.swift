@@ -15,6 +15,8 @@ final class MenuBarStatusController {
     private var animationFrame = 0
     private var currentStatus: MenuBarStatus = .idle
 
+    private var paidModeActive = false
+
     func attach(to button: NSStatusBarButton) {
         self.button = button
         button.imagePosition = .imageOnly
@@ -26,6 +28,12 @@ final class MenuBarStatusController {
         currentStatus = status
         animationFrame = 0
         configureAnimationIfNeeded()
+        renderCurrentStatus()
+    }
+
+    func setPaidMode(_ active: Bool) {
+        guard paidModeActive != active else { return }
+        paidModeActive = active
         renderCurrentStatus()
     }
 
@@ -63,7 +71,7 @@ final class MenuBarStatusController {
 
     private func renderCurrentStatus() {
         guard let button else { return }
-        button.image = MenuBarStatusIconRenderer.makeImage(for: currentStatus, frame: animationFrame)
+        button.image = MenuBarStatusIconRenderer.makeImage(for: currentStatus, frame: animationFrame, isPaidMode: paidModeActive)
         button.image?.isTemplate = true
         button.toolTip = tooltip(for: currentStatus)
     }
@@ -95,8 +103,8 @@ final class MenuBarStatusController {
 }
 
 private enum MenuBarStatusIconRenderer {
-    static func makeImage(for status: MenuBarStatus, frame: Int) -> NSImage {
-        if case .idle = status, let baseImage = baseTemplateImage() {
+    static func makeImage(for status: MenuBarStatus, frame: Int, isPaidMode: Bool = false) -> NSImage {
+        if case .idle = status, let baseImage = baseTemplateImage(), !isPaidMode {
             return baseImage
         }
 
@@ -105,6 +113,10 @@ private enum MenuBarStatusIconRenderer {
             drawBaseIcon(in: bounds, status: status, frame: frame)
 
             switch status {
+            case .idle:
+                if isPaidMode {
+                    drawPaidModeDot(in: bounds)
+                }
             case .recording(let type):
                 drawActivityBadge(
                     type: type,
@@ -125,8 +137,6 @@ private enum MenuBarStatusIconRenderer {
                 drawBadge(systemName: "checkmark", in: bounds, fillOpacity: 1.0)
             case .error:
                 drawBadge(systemName: "exclamationmark", in: bounds, fillOpacity: 1.0)
-            default:
-                break
             }
 
             return true
@@ -134,6 +144,19 @@ private enum MenuBarStatusIconRenderer {
         image.isTemplate = true
         image.size = size
         return image
+    }
+
+    private static func drawPaidModeDot(in bounds: CGRect) {
+        let dotSize: CGFloat = 3.5
+        let dotRect = CGRect(
+            x: bounds.maxX - dotSize - 0.8,
+            y: bounds.minY + 0.8,
+            width: dotSize,
+            height: dotSize
+        )
+        let path = NSBezierPath(ovalIn: dotRect)
+        NSColor.black.withAlphaComponent(0.85).setFill()
+        path.fill()
     }
 
     private enum ActivityPhase {

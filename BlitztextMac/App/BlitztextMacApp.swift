@@ -42,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         appState.onMenuBarStatusChange = { [weak self] status in
             self?.menuBarStatusController.update(to: status)
         }
+        GroqQuotaStore.shared.onFallbackChanged = { [weak self] active in
+            self?.menuBarStatusController.setPaidMode(active)
+        }
+        menuBarStatusController.setPaidMode(GroqQuotaStore.shared.fallbackActive)
         appState.hotkeyService.start()
 
         // Listen for popover dismiss requests (from auto-paste)

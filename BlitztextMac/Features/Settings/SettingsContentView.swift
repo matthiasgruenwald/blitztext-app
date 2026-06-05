@@ -57,15 +57,19 @@ private struct SectionLabel: View {
 
 struct AccessSettingsView: View {
     private static let openAIAPIKeyPattern = #"^sk-[A-Za-z0-9_-]{20,}$"#
+    private static let groqAPIKeyPattern = #"^gsk_[A-Za-z0-9]{20,}$"#
 
     @Bindable var appState: AppState
 
     private enum FieldFocus {
+        case groqAPIKey
         case openAIAPIKey
     }
 
     @State private var launchAtLoginService = LaunchAtLoginService()
     @State private var currentInstallLocation = BlitztextInstallLocationService.currentInstallLocation
+    @State private var groqAPIKey = ""
+    @State private var editingGroqKey = false
     @State private var openAIAPIKey = ""
     @State private var editingAPIKey = false
     @State private var saved = false
@@ -111,6 +115,53 @@ struct AccessSettingsView: View {
                     }
                     .buttonStyle(SubtleButtonStyle())
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    SectionLabel(text: "Groq API Key")
+                    Spacer()
+                    if appState.hasValue(for: .groqAPIKey) && !editingGroqKey {
+                        Button("Aendern") { editingGroqKey = true }
+                            .font(.system(size: 10, weight: .medium))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.blue)
+                    }
+                }
+
+                if appState.hasValue(for: .groqAPIKey) && !editingGroqKey {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.green.opacity(0.8))
+                        Text(appState.apiKeyDisplayValue(for: .groqAPIKey))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+                } else {
+                    HStack(spacing: 8) {
+                        SecureField("gsk_...", text: $groqAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11.5))
+                            .focused($focusedField, equals: .groqAPIKey)
+
+                        Button("Einfuegen") {
+                            pasteGroqKeyFromClipboard()
+                        }
+                        .buttonStyle(SubtleButtonStyle())
+                    }
+                }
+
+                Text("Optional. Schnellere Transkription über Groq, solange das Tages-Kontingent reicht. Danach automatisch OpenAI.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -359,7 +410,10 @@ struct AccessSettingsView: View {
             launchAtLoginService.refresh()
             refreshInstallState()
             load()
-            if !appState.hasValue(for: .openAIAPIKey) {
+            if !appState.hasValue(for: .groqAPIKey) && !appState.hasValue(for: .openAIAPIKey) {
+                editingAPIKey = true
+                focusedField = .openAIAPIKey
+            } else if !appState.hasValue(for: .openAIAPIKey) {
                 editingAPIKey = true
                 focusedField = .openAIAPIKey
             }
@@ -367,6 +421,7 @@ struct AccessSettingsView: View {
     }
 
     private func load() {
+        groqAPIKey = ""
         openAIAPIKey = ""
     }
 
@@ -375,8 +430,22 @@ struct AccessSettingsView: View {
         cleanupStatusText = nil
         cleanupErrorText = nil
         KeychainService.invalidateCache()
-        let trimmedAPIKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Groq key (optional)
+        let trimmedGroqKey = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if editingGroqKey && !trimmedGroqKey.isEmpty {
+            do {
+                try KeychainService.save(key: .groqAPIKey, value: trimmedGroqKey)
+                groqAPIKey = ""
+                editingGroqKey = false
+            } catch {
+                saveErrorText = "Groq API Key konnte nicht gespeichert werden."
+                return
+            }
+        }
+
+        // OpenAI key (required)
+        let trimmedAPIKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if editingAPIKey || !appState.hasValue(for: .openAIAPIKey) {
             guard !trimmedAPIKey.isEmpty else {
                 saveErrorText = "Bitte trage deinen OpenAI API Key ein."
@@ -402,6 +471,22 @@ struct AccessSettingsView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation(.easeInOut(duration: 0.2)) { saved = false }
         }
+    }
+
+    private func pasteGroqKeyFromClipboard() {
+        guard let rawText = NSPasteboard.general.string(forType: .string) else {
+            saveErrorText = "Zwischenablage enthält keinen Text."
+            return
+        }
+        let firstLine = rawText.components(separatedBy: .newlines).first ?? rawText
+        let trimmedKey = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedKey.range(of: Self.groqAPIKeyPattern, options: .regularExpression) != nil else {
+            saveErrorText = "Zwischenablage enthält keinen plausiblen Groq API Key."
+            return
+        }
+        groqAPIKey = trimmedKey
+        NSPasteboard.general.clearContents()
+        saveErrorText = nil
     }
 
     private func pasteAPIKeyFromClipboard() {
@@ -513,6 +598,8 @@ struct AccessSettingsView: View {
 struct CustomizeSettingsView: View {
     @Bindable var appState: AppState
     @State private var newTerm = ""
+    @State private var availableDevices: [AudioInputDevice] = []
+    @AppStorage("selectedMicUID") private var selectedMicUID: String = ""
 
     private var installedLocalModels: [LocalTranscriptionModel] {
         LocalTranscriptionService.installedModels()
@@ -591,6 +678,20 @@ struct CustomizeSettingsView: View {
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            // MARK: Mikrofon
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(text: "Mikrofon")
+
+                Picker("", selection: $selectedMicUID) {
+                    Text("System-Standard").tag("")
+                    ForEach(availableDevices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
             }
 
             // MARK: Tastenkuerzel
@@ -782,6 +883,9 @@ struct CustomizeSettingsView: View {
 
         }
         .padding(16)
+        .onAppear {
+            availableDevices = MicrophoneService.availableInputDevices()
+        }
     }
 
     private func addTerm() {

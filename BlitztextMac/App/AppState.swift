@@ -108,7 +108,10 @@ final class AppState {
                     ? "Lokal: \(LocalTranscriptionModel.displayName(for: modelName))."
                     : "Lokales WhisperKit-Modell fehlt."
             }
-            return "Online: Whisper über OpenAI."
+            let store = GroqQuotaStore.shared
+            let hasGroqKey = KeychainService.load(key: .groqAPIKey) != nil
+            if hasGroqKey && !store.fallbackActive { return "Online: Groq Whisper." }
+            return "Online: OpenAI Whisper."
         case .localTranscription:
             return "Nur lokal. Kein Server."
         case .textImprover, .dampfAblassen, .emojiText:

@@ -1,89 +1,57 @@
 import Foundation
 
-enum TranscriptionError: LocalizedError {
-    case noFile
+enum GroqTranscriptionError: LocalizedError {
     case notConfigured
+    case rateLimitExceeded(resetAt: Date?)
     case networkError(String)
     case apiError(String)
 
     var errorDescription: String? {
         switch self {
-        case .noFile:
-            return "Keine Audio-Datei gefunden"
         case .notConfigured:
-            return "API Key fehlt. Bitte in den Einstellungen hinterlegen."
+            return "Groq API Key fehlt."
+        case .rateLimitExceeded:
+            return "Groq-Kontingent aufgebraucht. Wechsel zu OpenAI."
         case .networkError(let msg):
             return "Netzwerkfehler: \(msg)"
         case .apiError(let msg):
-            return "API-Fehler: \(msg)"
+            return "Groq-Fehler: \(msg)"
         }
     }
 }
 
-private struct TranscriptionOpenAIErrorResponse: Decodable {
+struct GroqRateLimitInfo {
+    let remainingAudioSeconds: Int?
+    let resetAt: Date?
+}
+
+private struct GroqErrorResponse: Decodable {
     struct APIError: Decodable {
         let message: String?
     }
     let error: APIError?
 }
 
-enum TranscriptionService {
-    private static let remoteModel = "gpt-4o-mini-transcribe"
-    private static let transcriptionsURL = URL(string: "https://api.openai.com/v1/audio/transcriptions")!
+enum GroqTranscriptionService {
+    private static let model = "whisper-large-v3-turbo"
+    private static let transcriptionsURL = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions")!
 
     private static let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = false
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 60
-        return URLSession(configuration: configuration)
+        let config = URLSessionConfiguration.ephemeral
+        config.waitsForConnectivity = false
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 60
+        return URLSession(configuration: config)
     }()
 
     static func transcribe(
         audioURL: URL,
+        apiKey: String,
         customTerms: [String] = [],
         language: String? = nil
-    ) async throws -> String {
-        let groqKey = KeychainService.load(key: .groqAPIKey)
-        let fallbackActive = await MainActor.run { GroqQuotaStore.shared.fallbackActive }
-
-        if let groqKey, !fallbackActive {
-            do {
-                let (text, info) = try await GroqTranscriptionService.transcribe(
-                    audioURL: audioURL,
-                    apiKey: groqKey,
-                    customTerms: customTerms,
-                    language: language
-                )
-                if let remaining = info.remainingAudioSeconds, let resetAt = info.resetAt {
-                    await MainActor.run { GroqQuotaStore.shared.update(remainingSeconds: remaining, resetAt: resetAt) }
-                }
-                return text
-            } catch GroqTranscriptionError.rateLimitExceeded(let resetAt) {
-                await MainActor.run { GroqQuotaStore.shared.activateFallback(resetAt: resetAt) }
-                // fall through to OpenAI
-            }
-            // other Groq errors propagate as-is
-        }
-
-        return try await openAITranscribe(audioURL: audioURL, customTerms: customTerms, language: language)
-    }
-
-    private static func openAITranscribe(
-        audioURL: URL,
-        customTerms: [String],
-        language: String?
-    ) async throws -> String {
-        guard let apiKey = KeychainService.load(key: .openAIAPIKey) else {
-            throw TranscriptionError.notConfigured
-        }
-
+    ) async throws -> (text: String, rateLimitInfo: GroqRateLimitInfo) {
         return try await Task.detached(priority: .userInitiated) {
-            defer {
-                try? FileManager.default.removeItem(at: audioURL)
-            }
-
             let boundary = UUID().uuidString
             var request = URLRequest(url: transcriptionsURL)
             request.httpMethod = "POST"
@@ -104,7 +72,7 @@ enum TranscriptionService {
 
             body.append("--\(boundary)\r\n")
             body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
-            body.append(remoteModel)
+            body.append(model)
             body.append("\r\n")
 
             body.append("--\(boundary)\r\n")
@@ -133,25 +101,54 @@ enum TranscriptionService {
             let (data, response) = try await session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
-                throw TranscriptionError.networkError("Ungueltige Antwort")
+                throw GroqTranscriptionError.networkError("Ungueltige Antwort")
+            }
+
+            if httpResponse.statusCode == 429 {
+                let resetAt = parseResetDate(from: httpResponse)
+                throw GroqTranscriptionError.rateLimitExceeded(resetAt: resetAt)
             }
 
             guard httpResponse.statusCode == 200 else {
-                throw TranscriptionError.apiError(openAIErrorMessage(from: data) ?? "Status \(httpResponse.statusCode)")
+                let msg = groqErrorMessage(from: data) ?? "Status \(httpResponse.statusCode)"
+                throw GroqTranscriptionError.apiError(msg)
             }
 
             guard let text = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty else {
-                throw TranscriptionError.apiError("Transkription fehlgeschlagen")
+                throw GroqTranscriptionError.apiError("Transkription fehlgeschlagen")
             }
 
-            return text
+            let rateLimitInfo = GroqRateLimitInfo(
+                remainingAudioSeconds: parseRemainingSeconds(from: httpResponse),
+                resetAt: parseResetDate(from: httpResponse)
+            )
+
+            return (text, rateLimitInfo)
         }.value
     }
 
-    private static func openAIErrorMessage(from data: Data) -> String? {
-        (try? JSONDecoder().decode(TranscriptionOpenAIErrorResponse.self, from: data))?.error?.message
+    private static func groqErrorMessage(from data: Data) -> String? {
+        (try? JSONDecoder().decode(GroqErrorResponse.self, from: data))?.error?.message
+    }
+
+    private static func parseRemainingSeconds(from response: HTTPURLResponse) -> Int? {
+        guard let value = response.value(forHTTPHeaderField: "x-ratelimit-remaining-audio-seconds") else {
+            return nil
+        }
+        return Int(value)
+    }
+
+    private static func parseResetDate(from response: HTTPURLResponse) -> Date? {
+        guard let value = response.value(forHTTPHeaderField: "x-ratelimit-reset-audio") else {
+            return nil
+        }
+        if let seconds = TimeInterval(value) {
+            return Date().addingTimeInterval(seconds)
+        }
+        // fallback: 24h from now if header is present but unparseable
+        return Date().addingTimeInterval(86400)
     }
 }
 

@@ -124,13 +124,13 @@ struct MenuBarView: View {
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Image(systemName: appState.appSettings.secureLocalModeEnabled ? "lock.shield.fill" : "network")
+                Image(systemName: onlineModeIconName)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(appState.appSettings.secureLocalModeEnabled ? .green : .blue)
+                    .foregroundStyle(onlineModeIconColor)
                     .frame(width: 22, height: 22)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(appState.appSettings.secureLocalModeEnabled ? "Sicherer lokaler Modus" : "Online Whisper")
+                    Text(appState.appSettings.secureLocalModeEnabled ? "Sicherer lokaler Modus" : onlineModeTitle)
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -212,6 +212,25 @@ struct MenuBarView: View {
         )
     }
 
+    private var onlineModeIconName: String {
+        if appState.appSettings.secureLocalModeEnabled { return "lock.shield.fill" }
+        return GroqQuotaStore.shared.fallbackActive ? "eurosign.circle" : "network"
+    }
+
+    private var onlineModeIconColor: Color {
+        if appState.appSettings.secureLocalModeEnabled { return .green }
+        let hasGroqKey = KeychainService.load(key: .groqAPIKey) != nil
+        if hasGroqKey && !GroqQuotaStore.shared.fallbackActive { return .blue }
+        return .secondary
+    }
+
+    private var onlineModeTitle: String {
+        let store = GroqQuotaStore.shared
+        let hasGroqKey = KeychainService.load(key: .groqAPIKey) != nil
+        if hasGroqKey && !store.fallbackActive { return "Groq Whisper" }
+        return "OpenAI Whisper"
+    }
+
     private func modePanelSubtitle(selectedModelInstalled: Bool) -> String {
         if appState.appSettings.secureLocalModeEnabled {
             if appState.isDownloadingLocalModel {
@@ -223,7 +242,20 @@ struct MenuBarView: View {
             return "\(appState.selectedLocalModelDisplayName) ist noch nicht installiert."
         }
 
-        return "Blitztext nutzt gerade die OpenAI-Transkription."
+        let store = GroqQuotaStore.shared
+        let hasGroqKey = KeychainService.load(key: .groqAPIKey) != nil
+
+        if hasGroqKey {
+            if store.fallbackActive {
+                return "OpenAI Whisper · Groq-Kontingent aufgebraucht."
+            }
+            if let remaining = store.formattedRemaining {
+                return "Groq Whisper · noch \(remaining) heute."
+            }
+            return "Groq Whisper"
+        }
+
+        return "OpenAI Whisper"
     }
 
     private var accessibilityHintBanner: some View {

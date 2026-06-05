@@ -2,10 +2,12 @@ import Foundation
 import Security
 
 enum KeychainKey: String, CaseIterable, Codable {
+    case groqAPIKey = "groqAPIKey"
     case openAIAPIKey = "openAIAPIKey"
 
     var label: String {
         switch self {
+        case .groqAPIKey: return "Groq API Key"
         case .openAIAPIKey: return "OpenAI API Key"
         }
     }
